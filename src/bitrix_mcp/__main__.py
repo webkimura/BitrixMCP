@@ -21,7 +21,7 @@ import contextlib
 import logging
 import os
 
-from .config import config
+from .config import config, load_dotenv
 from .sanitize import install_log_filter
 from .server import mcp
 
@@ -160,6 +160,10 @@ async def _serve_http(store, host: str, port: int) -> None:
 
 
 def main() -> None:
+    # Before the parser: --transport/--host/--port read their defaults out of
+    # os.environ inside add_argument, so the file has to be in by then.
+    env_file = load_dotenv()
+
     parser = argparse.ArgumentParser(prog="bitrix-mcp", description="Bitrix24 MCP server")
     parser.add_argument(
         "--transport",
@@ -178,6 +182,9 @@ def main() -> None:
     # for a webhook call that URL contains the token. Install this first so no
     # startup request can beat it to the log file.
     install_log_filter()
+
+    if env_file:
+        log.info("loaded settings from %s", env_file)
 
     transport = "streamable-http" if (args.http or args.transport in ("http", "streamable-http")) else "stdio"
 

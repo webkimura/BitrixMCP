@@ -39,7 +39,14 @@ fixed *by design*, not patched around:
 **If nothing is installed on the machine**, take the portable archive
 (`dist/bitrix-mcp-portable.zip`, built by `python scripts/build_portable.py`).
 It carries its own Python and every library — no uv, no pip, no PyPI access.
-Unzip it and run the bundled launcher.
+Unzip it, drop a `.env` with your webhook next to it, and run the bundled
+launcher: it asks which agent you use (Claude Code, Claude Desktop, Cursor) and
+writes the server into that agent's config. Without the launcher:
+`runtime\python.exe install_mcp.py --agent cursor`.
+
+Do **not** run the portable folder through `uv run --directory`: it ships no
+`src/` — the package is already installed under `runtime` — so uv would build an
+empty wheel. Its runtime is `runtime\python.exe -m bitrix_mcp`.
 
 From source:
 

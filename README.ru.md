@@ -40,7 +40,14 @@ Python/Node).
 **Если у вас ничего не установлено** — берите портативный архив
 (`dist/bitrix-mcp-portable.zip`, собирается `python scripts/build_portable.py`).
 Внутри свой Python и все библиотеки: ни uv, ни pip, ни доступ к PyPI не нужны.
-Распаковать и запустить «ПОДКЛЮЧИТЬ К CLAUDE.bat».
+Распаковать, положить рядом `.env` с вебхуком и запустить «ПОДКЛЮЧИТЬ.bat» —
+он спросит, какой у вас агент (Claude Code, Claude Desktop, Cursor), и пропишет
+сервер в его конфигурацию. То же без .bat:
+`runtime\python.exe install_mcp.py --agent cursor`.
+
+Портативную сборку **не** запускают через `uv run --directory`: `src/` в ней нет,
+пакет уже установлен в `runtime`, и uv соберёт пустое колесо. Её рантайм —
+`runtime\python.exe -m bitrix_mcp`.
 
 Из исходников:
 

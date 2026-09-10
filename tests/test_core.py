@@ -8,6 +8,7 @@ guard, and tool-registration parity.
 from __future__ import annotations
 
 import asyncio
+import os
 
 import pytest
 
@@ -225,3 +226,72 @@ def test_every_tool_excludes_context_from_schema():
     for t in tools:
         props = t.input_schema.get("properties", {})
         assert "ctx" not in props, f"{t.name} leaks ctx into its schema"
+
+
+# --- .env loading ------------------------------------------------------------
+# The portable build starts `runtime/python.exe -m bitrix_mcp` directly, with no
+# launcher to read the file for it. Without this the server starts, serves every
+# tool, and fails only on the first call - which reads as a broken server.
+
+def test_dotenv_is_loaded_from_cwd(tmp_path, monkeypatch):
+    from bitrix_mcp.config import load_dotenv
+
+    (tmp_path / ".env").write_text(
+        "# comment\n\nBITRIX_WEBHOOK_URL=https://p.bitrix24.ru/rest/1/tok/\n"
+        'BITRIX_READ_ONLY="1"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BITRIX_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("BITRIX_READ_ONLY", raising=False)
+
+    assert load_dotenv() == tmp_path / ".env"
+    assert os.environ["BITRIX_WEBHOOK_URL"] == "https://p.bitrix24.ru/rest/1/tok/"
+    assert os.environ["BITRIX_READ_ONLY"] == "1"  # quotes stripped
+
+
+def test_dotenv_does_not_override_the_environment(tmp_path, monkeypatch):
+    """What the agent passed in its `env` block is newer than the file."""
+    from bitrix_mcp.config import load_dotenv
+
+    (tmp_path / ".env").write_text("BITRIX_WEBHOOK_URL=https://file/rest/1/f/\n",
+                                   encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BITRIX_WEBHOOK_URL", "https://env/rest/1/e/")
+
+    load_dotenv()
+    assert os.environ["BITRIX_WEBHOOK_URL"] == "https://env/rest/1/e/"
+
+
+def test_dotenv_survives_a_bom(tmp_path, monkeypatch):
+    """Notepad and Set-Content write one; it would glue itself to the first key."""
+    from bitrix_mcp.config import load_dotenv
+
+    (tmp_path / ".env").write_text("BITRIX_WEBHOOK_URL=https://p/rest/1/t/\n",
+                                   encoding="utf-8-sig")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BITRIX_WEBHOOK_URL", raising=False)
+
+    load_dotenv()
+    assert os.environ["BITRIX_WEBHOOK_URL"] == "https://p/rest/1/t/"
+
+
+def test_dotenv_absent_is_not_an_error(tmp_path, monkeypatch):
+    from bitrix_mcp.config import load_dotenv
+
+    monkeypatch.chdir(tmp_path)
+    assert load_dotenv() is None
+
+
+def test_dotenv_fills_an_empty_environment_entry(tmp_path, monkeypatch):
+    """An agent config with `"env": {"BITRIX_WEBHOOK_URL": ""}` must not shadow
+    the file with nothing."""
+    from bitrix_mcp.config import load_dotenv
+
+    (tmp_path / ".env").write_text("BITRIX_WEBHOOK_URL=https://p/rest/1/t/\n",
+                                   encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BITRIX_WEBHOOK_URL", "")
+
+    load_dotenv()
+    assert os.environ["BITRIX_WEBHOOK_URL"] == "https://p/rest/1/t/"

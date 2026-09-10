@@ -9,6 +9,48 @@ application — the server is a generic Bitrix24 REST gateway.
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+
+def load_dotenv() -> Path | None:
+    """Load a `.env` sitting next to the installation into the environment.
+
+    Under `uv run --env-file .env` the launcher does this and the server never
+    has to. The portable build has no launcher - it starts
+    `runtime/python.exe -m bitrix_mcp` directly - so unless the server reads
+    the file itself, every call fails with NO_WEBHOOK while the server itself
+    looks perfectly healthy.
+
+    First file found wins, and a variable already set to a non-empty value is
+    left alone: what the agent passed in its `env` block, or what the shell
+    exported, is newer than the file.
+
+    Returns:
+        The file that was read, or None if there was none.
+    """
+    candidates = (
+        # portable build: runtime/python.exe -> the .env next to the archive root
+        Path(sys.executable).resolve().parent.parent / ".env",
+        Path.cwd() / ".env",
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        # utf-8-sig: a .env written by Notepad or Set-Content carries a BOM,
+        # which would otherwise glue itself to the first key name.
+        for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            # Not setdefault: an agent config with an empty `env` entry would
+            # otherwise shadow the file with nothing.
+            if not os.environ.get(key, "").strip():
+                os.environ[key] = value.strip().strip('"').strip("'")
+        return path
+    return None
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:

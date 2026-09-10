@@ -4,10 +4,13 @@
 
 Внутри архива — свой Python и все библиотеки: ни интерпретатора, ни uv, ни
 pip, ни доступа к PyPI на машине получателя не нужно. Распаковал, запустил
-.bat — сервер прописан в Claude Code.
+.bat — сервер прописан в агенте.
+
+Собирать нужно тем же питоном, что лежит внутри архива (PYTHON_VERSION):
+зависимости ставятся интерпретатором сборки, а работать будут в рантайме.
 
 Запуск:
-    python scripts/build_portable.py
+    uv run --python 3.11 python scripts/build_portable.py
 """
 
 import argparse
@@ -44,13 +47,16 @@ PYTHON_VERSION = '3.11.9'
 RUNTIME_URL = (f'https://www.python.org/ftp/python/{PYTHON_VERSION}/'
                f'python-{PYTHON_VERSION}-embed-amd64.zip')
 
+# Без pyproject.toml намеренно: src/ в портативной сборке нет (пакет уже стоит
+# в runtime), и uv, увидев здесь проект, соберёт пустое колесо и «успешно»
+# установит его - с ModuleNotFoundError на запуске.
 FILES = ('README.md', 'README.ru.md', 'ARCHITECTURE.md', 'ARCHITECTURE.ru.md',
          'ROADMAP.md', 'ROADMAP.ru.md', 'REQUIREMENTS.md', 'REQUIREMENTS.ru.md',
-         'SECURITY.md', 'LICENSE', 'pyproject.toml', '.env.example')
+         'SECURITY.md', 'LICENSE', '.env.example')
 
 LAUNCHER = r'''@echo off
 chcp 866 >nul
-title Bitrix24 MCP - podklyuchenie k Claude Code
+title Bitrix24 MCP - podklyuchenie k agentu
 setlocal
 set "HERE=%~dp0"
 
@@ -60,12 +66,12 @@ echo   1. Proveryayu rantaym i biblioteki
 if errorlevel 1 goto :fail
 
 echo.
-echo   2. Propisyvayu server v Claude Code
+echo   2. Propisyvayu server v konfiguraciyu agenta
 "%HERE%runtime\python.exe" "%HERE%install_mcp.py"
 if errorlevel 1 goto :fail
 
 echo.
-echo   Gotovo. Zapolnite .env (obrazec - .env.example) i perezapustite Claude Code.
+echo   Gotovo. Perezapustite agenta.
 echo.
 pause
 exit /b 0
@@ -80,22 +86,97 @@ exit /b 1
 
 INSTALLER = '''#!/usr/bin/env python3
 """
-Прописать сервер bitrix24 в конфигурацию Claude Code.
+Прописать сервер bitrix24 в конфигурацию агента.
 
 Существующие серверы не затираются: читаем файл, добавляем свою запись,
 пишем обратно.
+
+    python install_mcp.py                   # спросит, какой агент
+    python install_mcp.py --agent cursor    # без вопросов
 """
 
+import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-CONFIG = Path.home() / '.claude.json'
 NAME = 'bitrix24'
 
 
+def desktop_config() -> Path:
+    """Файл настроек Claude Desktop — свой на каждой платформе."""
+    if sys.platform == 'win32':
+        base = Path(os.environ.get('APPDATA') or Path.home() / 'AppData' / 'Roaming')
+        return base / 'Claude' / 'claude_desktop_config.json'
+    if sys.platform == 'darwin':
+        return (Path.home() / 'Library' / 'Application Support' / 'Claude'
+                / 'claude_desktop_config.json')
+    return Path.home() / '.config' / 'Claude' / 'claude_desktop_config.json'
+
+
+# Формат записи у всех троих одинаковый (mcpServers -> command/args),
+# различаются только файлы.
+AGENTS = {
+    'claude': ('Claude Code', lambda: Path.home() / '.claude.json'),
+    'claude-desktop': ('Claude Desktop', desktop_config),
+    'cursor': ('Cursor', lambda: Path.home() / '.cursor' / 'mcp.json'),
+}
+
+
+def ask() -> str:
+    """Спросить агента. Без консоли (запуск из скрипта) — Claude Code."""
+    keys = list(AGENTS)
+    if not sys.stdin or not sys.stdin.isatty():
+        return keys[0]
+
+    print('Куда прописать сервер?')
+    for number, key in enumerate(keys, 1):
+        print(f'  {number}. {AGENTS[key][0]}')
+    while True:
+        answer = input('Номер [1]: ').strip() or '1'
+        if answer.isdigit() and 1 <= int(answer) <= len(keys):
+            return keys[int(answer) - 1]
+        print('Не понял. Введите номер из списка.')
+
+
+def check_webhook() -> None:
+    """
+    Сказать про вебхук сейчас, а не после первого вызова.
+
+    Сервер без вебхука стартует, отдаёт инструменты и выглядит здоровым —
+    ошибку видно только в ответе на вызов, и выглядит она как поломка сервера.
+    """
+    env = HERE / '.env'
+    if not env.is_file():
+        print(f'ВНИМАНИЕ: нет файла {env}.')
+        print('           Скопируйте .env.example в .env и впишите вебхук портала.')
+        return
+
+    for line in env.read_text(encoding='utf-8-sig', errors='replace').splitlines():
+        key, _, value = line.strip().partition('=')
+        if key.strip() != 'BITRIX_WEBHOOK_URL':
+            continue
+        value = value.strip().strip('"').strip("'")
+        if value and 'your-portal' not in value:
+            return
+        break
+
+    print(f'ВНИМАНИЕ: в {env} не заполнен BITRIX_WEBHOOK_URL —')
+    print('           вызовы вернут NO_WEBHOOK.')
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='Прописать сервер bitrix24 в конфигурацию агента')
+    parser.add_argument('--agent', choices=list(AGENTS),
+                        help='Агент. Без него будет вопрос.')
+    args = parser.parse_args()
+
+    label, locate = AGENTS[args.agent or ask()]
+    path = locate()
+
     entry = {
         'command': str(HERE / 'runtime' / 'python.exe'),
         'args': ['-m', 'bitrix_mcp'],
@@ -103,20 +184,23 @@ def main() -> int:
     }
 
     config = {}
-    if CONFIG.exists():
+    if path.exists():
         try:
-            config = json.loads(CONFIG.read_text(encoding='utf-8')) or {}
+            config = json.loads(path.read_text(encoding='utf-8')) or {}
         except json.JSONDecodeError as e:
-            print(f'ОШИБКА: {CONFIG} повреждён ({e}). Файл не тронут.')
+            print(f'ОШИБКА: {path} повреждён ({e}). Файл не тронут.')
             return 1
 
     servers = config.setdefault('mcpServers', {})
     existed = NAME in servers
     servers[NAME] = entry
 
-    CONFIG.write_text(json.dumps(config, ensure_ascii=False, indent=2),
-                      encoding='utf-8')
-    print(f"Сервер {NAME} {'обновлён' if existed else 'добавлен'} в {CONFIG}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2),
+                    encoding='utf-8')
+    print(f"Сервер {NAME} {'обновлён' if existed else 'добавлен'}: {label}, {path}")
+
+    check_webhook()
     return 0
 
 
@@ -141,10 +225,20 @@ READ_ME = '''Bitrix24 MCP — шлюз к REST API Битрикс24 для аг�
    Вебхук — это учётные данные. Выдавайте его пользователю с минимально
    нужными правами, а не администратору. Подробности — в SECURITY.md.
 
-3. Запустите «ПОДКЛЮЧИТЬ К CLAUDE.bat» и перезапустите Claude Code.
+3. Запустите «ПОДКЛЮЧИТЬ.bat» — он спросит, какой у вас агент
+   (Claude Code, Claude Desktop или Cursor) — и перезапустите агента.
+
+   То же самое без .bat:  runtime\\python.exe install_mcp.py --agent cursor
 
 4. Скажите агенту, что нужно сделать в Битриксе. Если нужно только читать —
    поставьте в .env BITRIX_READ_ONLY=1, тогда запись заблокирована.
+
+Чего не делать
+--------------
+
+Не запускайте эту папку через «uv run --directory .» — это строка для
+установки из исходников, здесь она соберёт пустой пакет. Портативная сборка
+работает своим рантаймом: runtime\\python.exe -m bitrix_mcp
 
 Документация: README.ru.md, REQUIREMENTS.ru.md, SECURITY.md
 '''
@@ -209,9 +303,32 @@ def prepare_runtime(runtime_zip: Path, target: Path) -> None:
     compileall.compile_dir(str(packages), quiet=2, force=False)
 
 
+def check_builder() -> None:
+    """
+    Не дать собрать архив, который сломается только у получателя.
+
+    Зависимости ставит интерпретатор сборки, а лежать они будут в рантайме
+    PYTHON_VERSION. pydantic_core и rpds — бинарные и привязаны к версии
+    (_pydantic_core.cp311-win_amd64.pyd), так что собранный, скажем, под 3.13
+    архив выглядит целым, распаковывается, и падает ImportError на первом
+    запуске у того, кому его отдали.
+    """
+    want = tuple(int(part) for part in PYTHON_VERSION.split('.')[:2])
+    if sys.version_info[:2] != want:
+        have = '.'.join(str(part) for part in sys.version_info[:2])
+        raise SystemExit(
+            f'Собирать нужно питоном {want[0]}.{want[1]} — рантайм внутри архива '
+            f'именно такой, а бинарные колёса (pydantic_core, rpds) привязаны '
+            f'к версии. Сейчас запущен {have}.\n'
+            f'Например:  uv run --python {want[0]}.{want[1]} '
+            f'python scripts/build_portable.py')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.parse_args()
+
+    check_builder()
 
     build = ROOT.parent / f'{NAME}-build'
     if build.exists():
@@ -227,7 +344,7 @@ def main() -> int:
 
     prepare_runtime(fetch_runtime(), build / 'runtime')
 
-    (build / 'ПОДКЛЮЧИТЬ К CLAUDE.bat').write_bytes(
+    (build / 'ПОДКЛЮЧИТЬ.bat').write_bytes(
         LAUNCHER.replace('\n', '\r\n').encode('cp866'))
     (build / 'install_mcp.py').write_text(INSTALLER, encoding='utf-8')
     (build / 'ЧИТАЙ МЕНЯ.txt').write_bytes(
